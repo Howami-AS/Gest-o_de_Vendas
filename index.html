@@ -1,0 +1,969 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#2563eb">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Gestão de Vendas - PWA</title>
+  
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <link rel="manifest" id="manifest-placeholder">
+
+  <style>
+    body {
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .pb-safe { padding-bottom: calc(4rem + env(safe-area-inset-bottom)); }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 flex flex-col min-h-screen font-sans pb-safe">
+
+  <header class="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-40 flex justify-between items-center">
+    <div class="flex items-center space-x-2">
+      <i data-lucide="store" class="w-6 h-6"></i>
+      <h1 class="text-xl font-bold tracking-tight">Minha Loja</h1>
+    </div>
+    <div class="flex items-center space-x-2">
+      <button onclick="exportarExcel()" title="Baixar Relatório Excel" class="p-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition flex items-center space-x-1 text-xs font-semibold">
+        <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>
+        <span class="hidden sm:inline">Excel</span>
+      </button>
+      <button onclick="abrirModalBackup()" class="p-2 rounded-full hover:bg-blue-700 transition">
+        <i data-lucide="settings" class="w-5 h-5"></i>
+      </button>
+    </div>
+  </header>
+
+  <main id="app-content" class="flex-1 p-4 max-w-2xl mx-auto w-full">
+    </main>
+
+  <footer class="bg-slate-100 border-t border-slate-200 py-3 text-center text-sm text-slate-600">
+    <p>© Alisson Salvador 2026</p>
+  </footer>
+
+  <nav class="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-40 flex justify-around p-2 shadow-lg max-w-2xl mx-auto">
+    <button onclick="mudarAba('dashboard')" id="nav-dashboard" class="flex flex-col items-center py-1 px-3 text-blue-600">
+      <i data-lucide="home" class="w-5 h-5"></i>
+      <span class="text-xs font-medium mt-1">Início</span>
+    </button>
+    <button onclick="mudarAba('vendas')" id="nav-vendas" class="flex flex-col items-center py-1 px-3 text-slate-500">
+      <i data-lucide="shopping-cart" class="w-5 h-5"></i>
+      <span class="text-xs font-medium mt-1">Vendas</span>
+    </button>
+    <button onclick="mudarAba('produtos')" id="nav-produtos" class="flex flex-col items-center py-1 px-3 text-slate-500">
+      <i data-lucide="package" class="w-5 h-5"></i>
+      <span class="text-xs font-medium mt-1">Produtos</span>
+    </button>
+    <button onclick="mudarAba('financeiro')" id="nav-financeiro" class="flex flex-col items-center py-1 px-3 text-slate-500">
+      <i data-lucide="dollar-sign" class="w-5 h-5"></i>
+      <span class="text-xs font-medium mt-1">Financeiro</span>
+    </button>
+    <button onclick="mudarAba('relatorios')" id="nav-relatorios" class="flex flex-col items-center py-1 px-3 text-slate-500">
+      <i data-lucide="bar-chart-3" class="w-5 h-5"></i>
+      <span class="text-xs font-medium mt-1">Relatórios</span>
+    </button>
+  </nav>
+
+  <div id="modal-container" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
+    <div id="modal-body" class="bg-white rounded-2xl w-full max-w-lg p-6 shadow-2xl max-h-[90vh] overflow-y-auto"></div>
+  </div>
+
+  <script>
+    /* ==========================================================================
+       1. BANCO DE DADOS LOCAL (IndexedDB Wrapper)
+       ========================================================================== */
+    const DB_NAME = 'LojaPWA_DB';
+    const DB_VERSION = 1;
+    let db = null;
+
+    function abrirDB() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = (e) => {
+          const dbRef = e.target.result;
+          if (!dbRef.objectStoreNames.contains('produtos')) {
+            dbRef.createObjectStore('produtos', { keyPath: 'id', autoIncrement: true });
+          }
+          if (!dbRef.objectStoreNames.contains('vendas')) {
+            dbRef.createObjectStore('vendas', { keyPath: 'id', autoIncrement: true });
+          }
+        };
+        req.onsuccess = (e) => { db = e.target.result; resolve(db); };
+        req.onerror = (e) => reject(e.target.error);
+      });
+    }
+
+    function dbTrans(storeName, mode, callback) {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, mode);
+        const store = tx.objectStore(storeName);
+        const req = callback(store);
+        tx.oncomplete = () => resolve(req ? req.result : true);
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    const DB = {
+      getAll: (store) => dbTrans(store, 'readonly', s => s.getAll()),
+      add: (store, data) => dbTrans(store, 'readwrite', s => s.add(data)),
+      put: (store, data) => dbTrans(store, 'readwrite', s => s.put(data)),
+      delete: (store, id) => dbTrans(store, 'readwrite', s => s.delete(id)),
+      clear: (store) => dbTrans(store, 'readwrite', s => s.clear())
+    };
+
+    /* ==========================================================================
+       2. ESTADO DA APLICAÇÃO E UTILITÁRIOS
+       ========================================================================== */
+    let abaAtual = 'dashboard';
+
+    const fmtMoeda = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+    const fmtData = (isoStr) => {
+      if(!isoStr) return '';
+      const [ano, mes, dia] = isoStr.split('T')[0].split('-');
+      return `${dia}/${mes}/${ano}`;
+    };
+    const dataHojeIso = () => new Date().toISOString().split('T')[0];
+
+    /* ==========================================================================
+       3. EXPORTAÇÃO EXCEL COM ABA RELATÓRIOS
+       ========================================================================== */
+    async function exportarExcel() {
+      const vendas = await DB.getAll('vendas');
+      const produtos = await DB.getAll('produtos');
+
+      if (vendas.length === 0 && produtos.length === 0) {
+        alert('Não há dados para exportar no momento.');
+        return;
+      }
+
+      const wb = XLSX.utils.book_new();
+
+      // Tab 1: Resumo Financeiro
+      const totalFat = vendas.reduce((a, b) => a + b.valor_total, 0);
+      const totalQtd = vendas.reduce((a, b) => a + Number(b.quantidade), 0);
+
+      const pgtoResumo = vendas.reduce((acc, v) => {
+        acc[v.forma_pagamento] = (acc[v.forma_pagamento] || 0) + v.valor_total;
+        return acc;
+      }, {});
+
+      const resumoData = [
+        ["RELATÓRIO RESUMO DE VENDAS"],
+        ["Data da Exportação", fmtData(dataHojeIso())],
+        [],
+        ["Indicador", "Valor"],
+        ["Faturamento Total", totalFat],
+        ["Total de Vendas", vendas.length],
+        ["Itens Vendidos", totalQtd],
+        ["Ticket Médio", vendas.length ? totalFat / vendas.length : 0],
+        [],
+        ["Forma de Pagamento", "Total (R$)"],
+        ...Object.entries(pgtoResumo).map(([f, val]) => [f.toUpperCase(), val])
+      ];
+      const wsResumo = XLSX.utils.aoa_to_sheet(resumoData);
+      XLSX.utils.book_append_sheet(wb, wsResumo, "Resumo");
+
+      // Tab 2: Histórico de Vendas
+      const vendasData = [
+        ["ID", "Data", "Produto", "Qtd", "Valor Unitário (R$)", "Valor Total (R$)", "Forma de Pagamento"],
+        ...vendas.map(v => [
+          v.id,
+          fmtData(v.data),
+          v.nome_produto,
+          v.quantidade,
+          v.valor_unitario,
+          v.valor_total,
+          v.forma_pagamento.toUpperCase()
+        ])
+      ];
+      const wsVendas = XLSX.utils.aoa_to_sheet(vendasData);
+      XLSX.utils.book_append_sheet(wb, wsVendas, "Vendas");
+
+      // Tab 3: Produtos
+      const prodData = [
+        ["ID", "Nome", "Código/SKU", "Categoria", "Preço (R$)", "Estoque"],
+        ...produtos.map(p => [
+          p.id,
+          p.nome,
+          p.codigo || 'N/A',
+          p.categoria || 'Geral',
+          p.preco,
+          p.estoque ?? 'Ilimitado'
+        ])
+      ];
+      const wsProdutos = XLSX.utils.aoa_to_sheet(prodData);
+      XLSX.utils.book_append_sheet(wb, wsProdutos, "Produtos");
+
+      // Tab 4: Relatórios (Última Aba)
+      const relatoriosData = [
+        ["RELATÓRIOS E MÉTRICAS CONSOLIDADAS"],
+        ["Métrica", "Valor Atual"],
+        ["Faturamento Total", totalFat],
+        ["Quantidade de Vendas", vendas.length],
+        ["Itens Vendidos", totalQtd],
+        ["Ticket Médio", vendas.length ? totalFat / vendas.length : 0],
+        ["Total de Produtos Cadastrados", produtos.length]
+      ];
+      const wsRelatorios = XLSX.utils.aoa_to_sheet(relatoriosData);
+      XLSX.utils.book_append_sheet(wb, wsRelatorios, "Relatórios");
+
+      XLSX.writeFile(wb, `relatorio_vendas_${dataHojeIso()}.xlsx`);
+    }
+
+    /* ==========================================================================
+       4. NAVEGAÇÃO E TELAS
+       ========================================================================== */
+    function mudarAba(aba) {
+      abaAtual = aba;
+      document.querySelectorAll('nav button').forEach(btn => {
+        btn.classList.remove('text-blue-600');
+        btn.classList.add('text-slate-500');
+      });
+      const btnAtivo = document.getElementById(`nav-${aba}`);
+      if(btnAtivo) {
+        btnAtivo.classList.remove('text-slate-500');
+        btnAtivo.classList.add('text-blue-600');
+      }
+      renderizarTela();
+    }
+
+    async function renderizarTela() {
+      const container = document.getElementById('app-content');
+      lucide.createIcons();
+
+      switch(abaAtual) {
+        case 'dashboard':
+          container.innerHTML = await getDashboardHTML();
+          break;
+        case 'vendas':
+          container.innerHTML = await getVendasHTML();
+          break;
+        case 'produtos':
+          container.innerHTML = await getProdutosHTML();
+          break;
+        case 'financeiro':
+          container.innerHTML = await getFinanceiroHTML();
+          setTimeout(calcularFinanceiro, 50);
+          break;
+        case 'relatorios':
+          container.innerHTML = await getRelatoriosHTML();
+          renderizarGraficos();
+          break;
+      }
+      lucide.createIcons();
+    }
+
+    async function getDashboardHTML() {
+      const vendas = await DB.getAll('vendas');
+      const hoje = dataHojeIso();
+      const mesAtual = hoje.substring(0, 7);
+
+      const fatTotal = vendas.reduce((a, b) => a + b.valor_total, 0);
+      const qtdTotal = vendas.reduce((a, b) => a + Number(b.quantidade), 0);
+      
+      const vendasHoje = vendas.filter(v => v.data.startsWith(hoje));
+      const fatHoje = vendasHoje.reduce((a, b) => a + b.valor_total, 0);
+
+      const vendasMes = vendas.filter(v => v.data.startsWith(mesAtual));
+      const fatMes = vendasMes.reduce((a, b) => a + b.valor_total, 0);
+
+      const pgtoResumo = vendas.reduce((acc, v) => {
+        acc[v.forma_pagamento] = (acc[v.forma_pagamento] || 0) + v.valor_total;
+        return acc;
+      }, {});
+
+      return `
+        <div class="space-y-4">
+          <button onclick="abrirModalNovaVenda()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-lg flex items-center justify-center space-x-2 text-lg active:scale-95 transition">
+            <i data-lucide="plus-circle" class="w-6 h-6"></i>
+            <span>+ NOVA VENDA</span>
+          </button>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm col-span-2">
+              <span class="text-xs font-semibold uppercase text-slate-400">Faturamento Total</span>
+              <p class="text-3xl font-extrabold text-blue-600 mt-1">${fmtMoeda(fatTotal)}</p>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm">
+              <span class="text-xs font-semibold uppercase text-slate-400">Vendas Hoje</span>
+              <p class="text-xl font-bold text-slate-800 mt-1">${fmtMoeda(fatHoje)}</p>
+              <span class="text-xs text-slate-500">${vendasHoje.length} venda(s)</span>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm">
+              <span class="text-xs font-semibold uppercase text-slate-400">Vendas Mês</span>
+              <p class="text-xl font-bold text-slate-800 mt-1">${fmtMoeda(fatMes)}</p>
+              <span class="text-xs text-slate-500">${vendasMes.length} venda(s)</span>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm">
+              <span class="text-xs font-semibold uppercase text-slate-400">Total Vendas</span>
+              <p class="text-xl font-bold text-slate-800 mt-1">${vendas.length}</p>
+            </div>
+
+            <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm">
+              <span class="text-xs font-semibold uppercase text-slate-400">Itens Vendidos</span>
+              <p class="text-xl font-bold text-slate-800 mt-1">${qtdTotal}</p>
+            </div>
+          </div>
+
+          <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm">
+            <h3 class="text-sm font-bold text-slate-700 mb-3 uppercase tracking-wider">Formas de Pagamento</h3>
+            <div class="space-y-2">
+              ${Object.entries(pgtoResumo).map(([forma, val]) => `
+                <div class="flex justify-between items-center text-sm border-b border-slate-50 pb-1">
+                  <span class="text-slate-600 capitalize">${forma}</span>
+                  <span class="font-semibold text-slate-800">${fmtMoeda(val)}</span>
+                </div>
+              `).join('') || '<p class="text-slate-400 text-sm">Nenhuma venda registrada.</p>'}
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function getProdutosHTML() {
+      const produtos = await DB.getAll('produtos');
+      return `
+        <div class="space-y-4">
+          <div class="flex justify-between items-center">
+            <h2 class="text-xl font-bold text-slate-800">Produtos</h2>
+            <button onclick="abrirModalProduto()" class="bg-blue-600 text-white px-4 py-2 rounded-lg font-medium text-sm flex items-center space-x-1 shadow">
+              <i data-lucide="plus" class="w-4 h-4"></i>
+              <span>Novo Produto</span>
+            </button>
+          </div>
+
+          <div class="relative">
+            <input type="text" id="busca-produto" oninput="filtrarProdutos()" placeholder="Buscar por nome ou código..." class="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <i data-lucide="search" class="w-4 h-4 absolute left-3 top-3 text-slate-400"></i>
+          </div>
+
+          <div id="lista-produtos" class="space-y-2">
+            ${renderListaProdutosHTML(produtos)}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderListaProdutosHTML(produtos) {
+      if(produtos.length === 0) {
+        return `<p class="text-center py-8 text-slate-400 text-sm">Nenhum produto cadastrado.</p>`;
+      }
+      return produtos.map(p => `
+        <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex justify-between items-center">
+          <div>
+            <h4 class="font-semibold text-slate-800">${p.nome}</h4>
+            <p class="text-xs text-slate-400">Cód: ${p.codigo || 'N/A'} | Categoria: ${p.categoria || 'Geral'}</p>
+            <p class="text-sm font-bold text-blue-600 mt-1">${fmtMoeda(p.preco)} <span class="text-xs font-normal text-slate-500">(Estoque: ${p.estoque ?? '∞'})</span></p>
+          </div>
+          <div class="flex space-x-1">
+            <button onclick="abrirModalProduto(${p.id})" class="p-2 text-slate-600 hover:text-blue-600">
+              <i data-lucide="edit-3" class="w-4 h-4"></i>
+            </button>
+            <button onclick="deletarProduto(${p.id})" class="p-2 text-slate-600 hover:text-red-600">
+              <i data-lucide="trash-2" class="w-4 h-4"></i>
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function filtrarProdutos() {
+      const q = document.getElementById('busca-produto').value.toLowerCase();
+      const produtos = await DB.getAll('produtos');
+      const filtrados = produtos.filter(p => 
+        p.nome.toLowerCase().includes(q) || (p.codigo && p.codigo.toLowerCase().includes(q))
+      );
+      document.getElementById('lista-produtos').innerHTML = renderListaProdutosHTML(filtrados);
+      lucide.createIcons();
+    }
+
+    async function abrirModalProduto(id = null) {
+      let p = { nome: '', codigo: '', preco: '', estoque: '', categoria: '' };
+      if(id) p = await dbTrans('produtos', 'readonly', s => s.get(id));
+
+      abrirModal(`
+        <h3 class="text-lg font-bold mb-4 text-slate-800">${id ? 'Editar' : 'Cadastrar'} Produto</h3>
+        <form onsubmit="salvarProduto(event, ${id})" class="space-y-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Nome do Produto *</label>
+            <input type="text" id="prod-nome" required value="${p.nome}" class="w-full p-2.5 border border-slate-200 rounded-lg text-sm">
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="block text-xs font-semibold text-slate-600 mb-1">Código/SKU</label>
+              <input type="text" id="prod-codigo" value="${p.codigo || ''}" class="w-full p-2.5 border border-slate-200 rounded-lg text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-600 mb-1">Categoria</label>
+              <input type="text" id="prod-categoria" value="${p.categoria || ''}" class="w-full p-2.5 border border-slate-200 rounded-lg text-sm">
+            </div>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="block text-xs font-semibold text-slate-600 mb-1">Preço (R$) *</label>
+              <input type="number" step="0.01" min="0" id="prod-preco" required value="${p.preco}" class="w-full p-2.5 border border-slate-200 rounded-lg text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-600 mb-1">Estoque</label>
+              <input type="number" id="prod-estoque" value="${p.estoque ?? ''}" class="w-full p-2.5 border border-slate-200 rounded-lg text-sm">
+            </div>
+          </div>
+          <div class="flex space-x-2 pt-4">
+            <button type="button" onclick="fecharModal()" class="w-1/2 py-2.5 border border-slate-300 rounded-lg text-sm font-semibold text-slate-600">Cancelar</button>
+            <button type="submit" class="w-1/2 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-semibold">Salvar</button>
+          </div>
+        </form>
+      `);
+    }
+
+    async function salvarProduto(e, id) {
+      e.preventDefault();
+      const prod = {
+        nome: document.getElementById('prod-nome').value,
+        codigo: document.getElementById('prod-codigo').value,
+        categoria: document.getElementById('prod-categoria').value,
+        preco: parseFloat(document.getElementById('prod-preco').value),
+        estoque: document.getElementById('prod-estoque').value !== '' ? parseInt(document.getElementById('prod-estoque').value) : null,
+        data_cadastro: new Date().toISOString()
+      };
+      if(id) prod.id = id;
+
+      await DB.put('produtos', prod);
+      fecharModal();
+      renderizarTela();
+    }
+
+    async function deletarProduto(id) {
+      if(confirm('Deseja realmente excluir este produto?')) {
+        await DB.delete('produtos', id);
+        renderizarTela();
+      }
+    }
+
+    async function getVendasHTML() {
+      const vendas = await DB.getAll('vendas');
+      vendas.sort((a, b) => new Date(b.data) - new Date(a.data));
+
+      return `
+        <div class="space-y-4">
+          <div class="flex justify-between items-center">
+            <h2 class="text-xl font-bold text-slate-800">Histórico de Vendas</h2>
+            <button onclick="abrirModalNovaVenda()" class="bg-blue-600 text-white px-3 py-2 rounded-lg font-medium text-sm flex items-center space-x-1 shadow">
+              <i data-lucide="plus" class="w-4 h-4"></i>
+              <span>Nova Venda</span>
+            </button>
+          </div>
+
+          <div class="bg-white p-3 rounded-xl border border-slate-100 space-y-2">
+            <div class="grid grid-cols-2 gap-2">
+              <select id="filtro-periodo" onchange="aplicarFiltrosVendas()" class="p-2 border border-slate-200 rounded-lg text-xs bg-slate-50">
+                <option value="todos">Todo o período</option>
+                <option value="hoje">Hoje</option>
+                <option value="ontem">Ontem</option>
+                <option value="7dias">Últimos 7 dias</option>
+                <option value="mes">Este Mês</option>
+              </select>
+              <select id="filtro-pgto" onchange="aplicarFiltrosVendas()" class="p-2 border border-slate-200 rounded-lg text-xs bg-slate-50">
+                <option value="todos">Todas Formas Pgto</option>
+                <option value="dinheiro">Dinheiro</option>
+                <option value="pix">PIX</option>
+                <option value="debito">Débito</option>
+                <option value="credito">Crédito</option>
+                <option value="outro">Outro</option>
+              </select>
+            </div>
+          </div>
+
+          <div id="lista-vendas" class="space-y-2">
+            ${renderListaVendasHTML(vendas)}
+          </div>
+        </div>
+      `;
+    }
+
+    function renderListaVendasHTML(vendas) {
+      if(vendas.length === 0) {
+        return `<p class="text-center py-8 text-slate-400 text-sm">Nenhuma venda encontrada.</p>`;
+      }
+      return vendas.map(v => `
+        <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex justify-between items-center">
+          <div>
+            <div class="flex items-center space-x-2">
+              <span class="text-xs font-bold bg-slate-100 text-slate-600 px-2 py-0.5 rounded capitalize">${v.forma_pagamento}</span>
+              <span class="text-xs text-slate-400">${fmtData(v.data)}</span>
+            </div>
+            <h4 class="font-semibold text-slate-800 mt-1">${v.nome_produto}</h4>
+            <p class="text-xs text-slate-500">${v.quantidade}x ${fmtMoeda(v.valor_unitario)}</p>
+          </div>
+          <div class="text-right">
+            <p class="text-base font-bold text-slate-900">${fmtMoeda(v.valor_total)}</p>
+            <button onclick="deletarVenda(${v.id})" class="text-red-500 hover:text-red-700 text-xs mt-1">Excluir</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function aplicarFiltrosVendas() {
+      let vendas = await DB.getAll('vendas');
+      vendas.sort((a, b) => new Date(b.data) - new Date(a.data));
+
+      const p = document.getElementById('filtro-periodo').value;
+      const pg = document.getElementById('filtro-pgto').value;
+
+      const hoje = new Date();
+      hoje.setHours(0,0,0,0);
+
+      if(p !== 'todos') {
+        vendas = vendas.filter(v => {
+          const d = new Date(v.data);
+          d.setHours(0,0,0,0);
+          if(p === 'hoje') return d.getTime() === hoje.getTime();
+          if(p === 'ontem') {
+            const ontem = new Date(hoje);
+            ontem.setDate(hoje.getDate() - 1);
+            return d.getTime() === ontem.getTime();
+          }
+          if(p === '7dias') {
+            const limite = new Date(hoje);
+            limite.setDate(hoje.getDate() - 7);
+            return d >= limite;
+          }
+          if(p === 'mes') {
+            return d.getMonth() === hoje.getMonth() && d.getFullYear() === hoje.getFullYear();
+          }
+          return true;
+        });
+      }
+
+      if(pg !== 'todos') {
+        vendas = vendas.filter(v => v.forma_pagamento === pg);
+      }
+
+      document.getElementById('lista-vendas').innerHTML = renderListaVendasHTML(vendas);
+    }
+
+    async function abrirModalNovaVenda() {
+      const produtos = await DB.getAll('produtos');
+      if(produtos.length === 0) {
+        alert('Cadastre ao menos um produto antes de realizar uma venda.');
+        mudarAba('produtos');
+        return;
+      }
+
+      abrirModal(`
+        <h3 class="text-lg font-bold mb-4 text-slate-800">Registrar Venda</h3>
+        <form onsubmit="finalizarVenda(event)" class="space-y-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Data da Venda</label>
+            <input type="date" id="venda-data" value="${dataHojeIso()}" required class="w-full p-2.5 border border-slate-200 rounded-lg text-sm">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Produto *</label>
+            <select id="venda-produto" required onchange="atualizarPrecoVenda()" class="w-full p-2.5 border border-slate-200 rounded-lg text-sm bg-white">
+              <option value="">Selecione um produto...</option>
+              ${produtos.map(p => `<option value="${p.id}" data-preco="${p.preco}" data-nome="${p.nome}" data-estoque="${p.estoque ?? ''}">${p.nome} (${fmtMoeda(p.preco)})${p.estoque !== null ? ` - Estoque: ${p.estoque}` : ' - Sem limite de estoque'}</option>`).join('')}
+            </select>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="block text-xs font-semibold text-slate-600 mb-1">Qtd *</label>
+              <input type="number" id="venda-qtd" min="1" value="1" required oninput="calcularTotalVenda()" class="w-full p-2.5 border border-slate-200 rounded-lg text-sm">
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-slate-600 mb-1">Valor Unitário</label>
+              <input type="number" step="0.01" id="venda-unitario" readonly class="w-full p-2.5 bg-slate-100 border border-slate-200 rounded-lg text-sm">
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Valor Total</label>
+            <input type="text" id="venda-total" readonly class="w-full p-2.5 bg-blue-50 text-blue-600 font-bold border border-blue-200 rounded-lg text-base">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Forma de Pagamento *</label>
+            <select id="venda-pgto" required class="w-full p-2.5 border border-slate-200 rounded-lg text-sm bg-white">
+              <option value="dinheiro">Dinheiro</option>
+              <option value="pix">PIX</option>
+              <option value="debito">Cartão de Débito</option>
+              <option value="credito">Cartão de Crédito</option>
+              <option value="outro">Outro</option>
+            </select>
+          </div>
+          <div class="flex space-x-2 pt-4">
+            <button type="button" onclick="fecharModal()" class="w-1/2 py-2.5 border border-slate-300 rounded-lg text-sm font-semibold text-slate-600">Cancelar</button>
+            <button type="submit" class="w-1/2 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-bold">FINALIZAR VENDA</button>
+          </div>
+        </form>
+      `);
+    }
+
+    function atualizarPrecoVenda() {
+      const select = document.getElementById('venda-produto');
+      const opt = select.options[select.selectedIndex];
+      const preco = opt.dataset.preco || 0;
+      document.getElementById('venda-unitario').value = preco;
+      calcularTotalVenda();
+    }
+
+    function calcularTotalVenda() {
+      const unit = parseFloat(document.getElementById('venda-unitario').value || 0);
+      const qtd = parseInt(document.getElementById('venda-qtd').value || 0);
+      const total = unit * (qtd > 0 ? qtd : 0);
+      document.getElementById('venda-total').value = fmtMoeda(total);
+    }
+
+    async function finalizarVenda(e) {
+      e.preventDefault();
+      const select = document.getElementById('venda-produto');
+      const opt = select.options[select.selectedIndex];
+      const prodId = parseInt(select.value);
+      const qtd = parseInt(document.getElementById('venda-qtd').value);
+      const unit = parseFloat(document.getElementById('venda-unitario').value);
+
+      if(!prodId || qtd <= 0) {
+        alert('Selecione um produto e uma quantidade válida.');
+        return;
+      }
+
+      const prod = await dbTrans('produtos', 'readonly', s => s.get(prodId));
+
+      if(prod && prod.estoque !== null) {
+        if(prod.estoque <= 0) {
+          alert('Estoque zerado. Não é possível concluir esta venda.');
+          return;
+        }
+
+        if(qtd > prod.estoque) {
+          alert(`Quantidade indisponível. Só há ${prod.estoque} unidade(s) em estoque.`);
+          return;
+        }
+
+        prod.estoque -= qtd;
+        await DB.put('produtos', prod);
+      }
+
+      const venda = {
+        data: document.getElementById('venda-data').value,
+        produto_id: prodId,
+        nome_produto: opt.dataset.nome,
+        quantidade: qtd,
+        valor_unitario: unit,
+        valor_total: unit * qtd,
+        forma_pagamento: document.getElementById('venda-pgto').value
+      };
+
+      await DB.add('vendas', venda);
+      fecharModal();
+      renderizarTela();
+    }
+
+    async function deletarVenda(id) {
+      if(confirm('Deseja cancelar/excluir esta venda?')) {
+        await DB.delete('vendas', id);
+        renderizarTela();
+      }
+    }
+
+    async function getFinanceiroHTML() {
+      const hoje = dataHojeIso();
+      const inicioMes = hoje.substring(0, 8) + '01';
+
+      return `
+        <div class="space-y-4">
+          <h2 class="text-xl font-bold text-slate-800">Financeiro</h2>
+
+          <div class="bg-white p-4 rounded-xl border border-slate-100 space-y-3">
+            <span class="text-xs font-semibold text-slate-500 uppercase">Filtrar Período</span>
+            <div class="grid grid-cols-2 gap-2">
+              <div>
+                <label class="text-xs text-slate-400">Início</label>
+                <input type="date" id="fin-inicio" value="${inicioMes}" onchange="calcularFinanceiro()" class="w-full p-2 border border-slate-200 rounded-lg text-xs">
+              </div>
+              <div>
+                <label class="text-xs text-slate-400">Fim</label>
+                <input type="date" id="fin-fim" value="${hoje}" onchange="calcularFinanceiro()" class="w-full p-2 border border-slate-200 rounded-lg text-xs">
+              </div>
+            </div>
+          </div>
+
+          <div id="financeiro-resultado" class="space-y-3">
+            </div>
+        </div>
+      `;
+    }
+
+    async function calcularFinanceiro() {
+      const container = document.getElementById('financeiro-resultado');
+      if(!container) return;
+
+      const inicio = document.getElementById('fin-inicio').value;
+      const fim = document.getElementById('fin-fim').value;
+
+      const vendas = await DB.getAll('vendas');
+      const filtradas = vendas.filter(v => {
+        const d = v.data.substring(0, 10);
+        return d >= inicio && d <= fim;
+      });
+
+      const totalBruto = filtradas.reduce((a, b) => a + b.valor_total, 0);
+      const porForma = filtradas.reduce((acc, v) => {
+        acc[v.forma_pagamento] = (acc[v.forma_pagamento] || 0) + v.valor_total;
+        return acc;
+      }, {});
+
+      container.innerHTML = `
+        <div class="bg-blue-600 text-white p-5 rounded-2xl shadow-lg">
+          <span class="text-xs uppercase tracking-wider opacity-80">Faturamento Bruto</span>
+          <p class="text-3xl font-black mt-1">${fmtMoeda(totalBruto)}</p>
+          <span class="text-xs opacity-90 block mt-2">${filtradas.length} vendas no período</span>
+        </div>
+
+        <div class="bg-white p-4 rounded-xl border border-slate-100 space-y-2">
+          <h4 class="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Detalhamento por Meio de Pagamento</h4>
+          <div class="flex justify-between p-2 border-b text-sm">
+            <span>💵 Dinheiro</span>
+            <span class="font-bold">${fmtMoeda(porForma['dinheiro'])}</span>
+          </div>
+          <div class="flex justify-between p-2 border-b text-sm">
+            <span>⚡ PIX</span>
+            <span class="font-bold">${fmtMoeda(porForma['pix'])}</span>
+          </div>
+          <div class="flex justify-between p-2 border-b text-sm">
+            <span>💳 Cartão Débito</span>
+            <span class="font-bold">${fmtMoeda(porForma['debito'])}</span>
+          </div>
+          <div class="flex justify-between p-2 border-b text-sm">
+            <span>💳 Cartão Crédito</span>
+            <span class="font-bold">${fmtMoeda(porForma['credito'])}</span>
+          </div>
+          <div class="flex justify-between p-2 text-sm">
+            <span>🔹 Outro</span>
+            <span class="font-bold">${fmtMoeda(porForma['outro'])}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    async function getRelatoriosHTML() {
+      return `
+        <div class="space-y-4">
+          <h2 class="text-xl font-bold text-slate-800">Relatórios & Métricas</h2>
+
+          <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm space-y-2">
+            <h3 class="text-sm font-bold text-slate-700">Formas de Pagamento</h3>
+            <canvas id="chart-pgto" class="max-h-48"></canvas>
+          </div>
+
+          <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm space-y-2">
+            <h3 class="text-sm font-bold text-slate-700">Produtos Mais Vendidos (Qtd)</h3>
+            <canvas id="chart-mais-vendidos" class="max-h-48"></canvas>
+          </div>
+        </div>
+      `;
+    }
+
+    async function renderizarGraficos() {
+      const vendas = await DB.getAll('vendas');
+
+      const pgtoData = vendas.reduce((acc, v) => {
+        acc[v.forma_pagamento] = (acc[v.forma_pagamento] || 0) + v.valor_total;
+        return acc;
+      }, {});
+
+      const ctxPgto = document.getElementById('chart-pgto')?.getContext('2d');
+      if(ctxPgto) {
+        new Chart(ctxPgto, {
+          type: 'doughnut',
+          data: {
+            labels: Object.keys(pgtoData).map(k => k.toUpperCase()),
+            datasets: [{
+              data: Object.values(pgtoData),
+              backgroundColor: ['#22c55e', '#3b82f6', '#f59e0b', '#ec4899', '#64748b']
+            }]
+          },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      }
+
+      const prodData = vendas.reduce((acc, v) => {
+        acc[v.nome_produto] = (acc[v.nome_produto] || 0) + Number(v.quantidade);
+        return acc;
+      }, {});
+
+      const sortedProds = Object.entries(prodData).sort((a,b) => b[1] - a[1]).slice(0, 5);
+
+      const ctxProd = document.getElementById('chart-mais-vendidos')?.getContext('2d');
+      if(ctxProd) {
+        new Chart(ctxProd, {
+          type: 'bar',
+          data: {
+            labels: sortedProds.map(p => p[0]),
+            datasets: [{
+              label: 'Quantidade Vendida',
+              data: sortedProds.map(p => p[1]),
+              backgroundColor: '#2563eb'
+            }]
+          },
+          options: { responsive: true, maintainAspectRatio: false }
+        });
+      }
+    }
+
+    /* ==========================================================================
+       5. CONFIGURAÇÕES & BACKUP
+       ========================================================================== */
+    function abrirModalBackup() {
+      abrirModal(`
+        <h3 class="text-lg font-bold mb-4 text-slate-800">Backup & Configurações</h3>
+        <div class="space-y-4">
+          <div>
+            <h4 class="text-sm font-semibold text-slate-700">Exportar Planilha Excel</h4>
+            <p class="text-xs text-slate-500 mb-2">Gere um relatório em formato .xlsx formatado.</p>
+            <button onclick="exportarExcel()" class="w-full py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-semibold flex items-center justify-center space-x-2">
+              <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>
+              <span>Baixar Relatório Excel</span>
+            </button>
+          </div>
+
+          <hr class="border-slate-100">
+
+          <div>
+            <h4 class="text-sm font-semibold text-slate-700">Exportar Backup JSON</h4>
+            <p class="text-xs text-slate-500 mb-2">Baixe um backup do banco de dados completo.</p>
+            <button onclick="fazerBackup()" class="w-full py-2.5 bg-slate-800 text-white rounded-lg text-sm font-semibold flex items-center justify-center space-x-2">
+              <i data-lucide="download" class="w-4 h-4"></i>
+              <span>Baixar Backup JSON</span>
+            </button>
+          </div>
+
+          <div>
+            <h4 class="text-sm font-semibold text-slate-700">Restaurar Backup</h4>
+            <p class="text-xs text-slate-500 mb-2">Selecione um arquivo de backup para restaurar seus registros.</p>
+            <input type="file" id="input-restore" accept=".json" class="hidden" onchange="restaurarBackup(event)">
+            <button onclick="document.getElementById('input-restore').click()" class="w-full py-2.5 border border-slate-300 rounded-lg text-sm font-semibold text-slate-700 flex items-center justify-center space-x-2">
+              <i data-lucide="upload" class="w-4 h-4"></i>
+              <span>Carregar JSON</span>
+            </button>
+          </div>
+
+          <div class="pt-2">
+            <button onclick="fecharModal()" class="w-full py-2 border border-slate-200 rounded-lg text-xs font-semibold text-slate-500">Fechar</button>
+          </div>
+        </div>
+      `);
+      lucide.createIcons();
+    }
+
+    async function fazerBackup() {
+      const produtos = await DB.getAll('produtos');
+      const vendas = await DB.getAll('vendas');
+      const payload = JSON.stringify({ produtos, vendas, exportadoEm: new Date().toISOString() }, null, 2);
+
+      const blob = new Blob([payload], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `backup_loja_${dataHojeIso()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function restaurarBackup(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const data = JSON.parse(e.target.result);
+          if (data.produtos && data.vendas) {
+            if (confirm('Atenção: Isso substituirá os dados atuais! Deseja continuar?')) {
+              await DB.clear('produtos');
+              await DB.clear('vendas');
+
+              for (let p of data.produtos) await DB.add('produtos', p);
+              for (let v of data.vendas) await DB.add('vendas', v);
+
+              alert('Backup restaurado com sucesso!');
+              fecharModal();
+              renderizarTela();
+            }
+          } else {
+            alert('Arquivo de backup inválido.');
+          }
+        } catch (err) {
+          alert('Erro ao ler o arquivo JSON.');
+        }
+      };
+      reader.readAsText(file);
+    }
+
+    /* ==========================================================================
+       6. MODAL & SERVICE WORKER
+       ========================================================================== */
+    function abrirModal(conteudoHTML) {
+      document.getElementById('modal-body').innerHTML = conteudoHTML;
+      document.getElementById('modal-container').classList.remove('hidden');
+    }
+
+    function fecharModal() {
+      document.getElementById('modal-container').classList.add('hidden');
+    }
+
+    function gerarManifestoPWA() {
+      const myManifest = {
+        name: "Controle de Vendas PWA",
+        short_name: "Minha Loja",
+        start_url: "./",
+        display: "standalone",
+        background_color: "#ffffff",
+        theme_color: "#2563eb",
+        icons: [{
+          src: "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%232563eb' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='m2 7 4.41-4.41A2 2 0 0 1 7.83 2h8.34a2 2 0 0 1 1.42.59L22 7'/><path d='M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8'/><path d='M15 22v-4a2 2 0 0 0-2-2h-2a2 2 0 0 0-2 2v4'/><path d='M2 7h20'/></svg>",
+          sizes: "192x192 512x512",
+          type: "image/svg+xml"
+        }]
+      };
+      const stringManifest = JSON.stringify(myManifest);
+      const blob = new Blob([stringManifest], {type: 'application/json'});
+      const manifestURL = URL.createObjectURL(blob);
+      document.getElementById('manifest-placeholder').setAttribute('href', manifestURL);
+    }
+
+    function registrarServiceWorker() {
+      if ('serviceWorker' in navigator) {
+        const swCode = `
+          const CACHE_NAME = 'pwa-vendas-v2';
+          self.addEventListener('install', e => {
+            e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(['./'])));
+          });
+          self.addEventListener('fetch', e => {
+            e.respondWith(
+              caches.match(e.request).then(res => res || fetch(e.request))
+            );
+          });
+        `;
+        const blob = new Blob([swCode], { type: 'text/javascript' });
+        const swUrl = URL.createObjectURL(blob);
+        navigator.serviceWorker.register(swUrl).catch(() => {});
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      gerarManifestoPWA();
+      registrarServiceWorker();
+      await abrirDB();
+      renderizarTela();
+    });
+  </script>
+</body>
+</html>
