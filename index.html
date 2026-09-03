@@ -11,7 +11,7 @@
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/lucide@latest"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 
   <link rel="manifest" id="manifest-placeholder">
 
@@ -31,10 +31,6 @@
       <h1 class="text-xl font-bold tracking-tight">Minha Loja</h1>
     </div>
     <div class="flex items-center space-x-2">
-      <button onclick="exportarExcel()" title="Baixar Relatório Excel" class="p-2 bg-blue-700 hover:bg-blue-800 rounded-lg transition flex items-center space-x-1 text-xs font-semibold">
-        <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>
-        <span class="hidden sm:inline">Excel</span>
-      </button>
       <button onclick="abrirModalBackup()" class="p-2 rounded-full hover:bg-blue-700 transition">
         <i data-lucide="settings" class="w-5 h-5"></i>
       </button>
@@ -80,7 +76,7 @@
        1. BANCO DE DADOS LOCAL (IndexedDB Wrapper)
        ========================================================================== */
     const DB_NAME = 'LojaPWA_DB';
-    const DB_VERSION = 1;
+    const DB_VERSION = 2;
     let db = null;
 
     function abrirDB() {
@@ -93,6 +89,9 @@
           }
           if (!dbRef.objectStoreNames.contains('vendas')) {
             dbRef.createObjectStore('vendas', { keyPath: 'id', autoIncrement: true });
+          }
+          if (!dbRef.objectStoreNames.contains('vendas_excluidas')) {
+            dbRef.createObjectStore('vendas_excluidas', { keyPath: 'id' });
           }
         };
         req.onsuccess = (e) => { db = e.target.result; resolve(db); };
@@ -122,6 +121,8 @@
        2. ESTADO DA APLICAÇÃO E UTILITÁRIOS
        ========================================================================== */
     let abaAtual = 'dashboard';
+    let graficoPgto = null;
+    let graficoProdutos = null;
 
     const fmtMoeda = (v) => Number(v || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
     const fmtData = (isoStr) => {
@@ -130,91 +131,83 @@
       return `${dia}/${mes}/${ano}`;
     };
     const dataHojeIso = () => new Date().toISOString().split('T')[0];
+    const mesRelatorioAtual = () => document.getElementById('relatorio-mes')?.value || dataHojeIso().substring(0, 7);
+    const nomeMesRelatorio = (mes) => {
+      const [ano, numeroMes] = mes.split('-');
+      return new Date(Number(ano), Number(numeroMes) - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
+    };
+    const getVendasRelatorio = async () => {
+      const [vendas, vendasExcluidas] = await Promise.all([
+        DB.getAll('vendas'),
+        DB.getAll('vendas_excluidas')
+      ]);
+      return [
+        ...vendas.map(venda => ({ ...venda, excluida: false })),
+        ...vendasExcluidas.map(venda => ({ ...venda, excluida: true }))
+      ];
+    };
 
-    /* ==========================================================================
-       3. EXPORTAÇÃO EXCEL COM ABA RELATÓRIOS
-       ========================================================================== */
-    async function exportarExcel() {
-      const vendas = await DB.getAll('vendas');
+    async function atualizarRelatorio() {
+      await renderizarGraficos();
+    }
+
+    async function exportarPDF() {
+      const vendas = await getVendasRelatorio();
       const produtos = await DB.getAll('produtos');
-
-      if (vendas.length === 0 && produtos.length === 0) {
-        alert('Não há dados para exportar no momento.');
-        return;
-      }
-
-      const wb = XLSX.utils.book_new();
-
-      // Tab 1: Resumo Financeiro
-      const totalFat = vendas.reduce((a, b) => a + b.valor_total, 0);
-      const totalQtd = vendas.reduce((a, b) => a + Number(b.quantidade), 0);
-
-      const pgtoResumo = vendas.reduce((acc, v) => {
-        acc[v.forma_pagamento] = (acc[v.forma_pagamento] || 0) + v.valor_total;
+      const mes = mesRelatorioAtual();
+      const vendasMes = vendas.filter(v => v.data.startsWith(mes));
+      const faturamento = vendasMes.reduce((total, venda) => total + Number(venda.valor_total), 0);
+      const itensVendidos = vendasMes.reduce((total, venda) => total + Number(venda.quantidade), 0);
+      const porForma = vendasMes.reduce((acc, venda) => {
+        acc[venda.forma_pagamento] = (acc[venda.forma_pagamento] || 0) + Number(venda.valor_total);
+        return acc;
+      }, {});
+      const produtosMaisVendidos = vendasMes.reduce((acc, venda) => {
+        acc[venda.nome_produto] = (acc[venda.nome_produto] || 0) + Number(venda.quantidade);
         return acc;
       }, {});
 
-      const resumoData = [
-        ["RELATÓRIO RESUMO DE VENDAS"],
-        ["Data da Exportação", fmtData(dataHojeIso())],
-        [],
-        ["Indicador", "Valor"],
-        ["Faturamento Total", totalFat],
-        ["Total de Vendas", vendas.length],
-        ["Itens Vendidos", totalQtd],
-        ["Ticket Médio", vendas.length ? totalFat / vendas.length : 0],
-        [],
-        ["Forma de Pagamento", "Total (R$)"],
-        ...Object.entries(pgtoResumo).map(([f, val]) => [f.toUpperCase(), val])
-      ];
-      const wsResumo = XLSX.utils.aoa_to_sheet(resumoData);
-      XLSX.utils.book_append_sheet(wb, wsResumo, "Resumo");
-
-      // Tab 2: Histórico de Vendas
-      const vendasData = [
-        ["ID", "Data", "Produto", "Qtd", "Valor Unitário (R$)", "Valor Total (R$)", "Forma de Pagamento"],
-        ...vendas.map(v => [
-          v.id,
-          fmtData(v.data),
-          v.nome_produto,
-          v.quantidade,
-          v.valor_unitario,
-          v.valor_total,
-          v.forma_pagamento.toUpperCase()
-        ])
-      ];
-      const wsVendas = XLSX.utils.aoa_to_sheet(vendasData);
-      XLSX.utils.book_append_sheet(wb, wsVendas, "Vendas");
-
-      // Tab 3: Produtos
-      const prodData = [
-        ["ID", "Nome", "Código/SKU", "Categoria", "Preço (R$)", "Estoque"],
-        ...produtos.map(p => [
-          p.id,
-          p.nome,
-          p.codigo || 'N/A',
-          p.categoria || 'Geral',
-          p.preco,
-          p.estoque ?? 'Ilimitado'
-        ])
-      ];
-      const wsProdutos = XLSX.utils.aoa_to_sheet(prodData);
-      XLSX.utils.book_append_sheet(wb, wsProdutos, "Produtos");
-
-      // Tab 4: Relatórios (Última Aba)
-      const relatoriosData = [
-        ["RELATÓRIOS E MÉTRICAS CONSOLIDADAS"],
-        ["Métrica", "Valor Atual"],
-        ["Faturamento Total", totalFat],
-        ["Quantidade de Vendas", vendas.length],
-        ["Itens Vendidos", totalQtd],
-        ["Ticket Médio", vendas.length ? totalFat / vendas.length : 0],
-        ["Total de Produtos Cadastrados", produtos.length]
-      ];
-      const wsRelatorios = XLSX.utils.aoa_to_sheet(relatoriosData);
-      XLSX.utils.book_append_sheet(wb, wsRelatorios, "Relatórios");
-
-      XLSX.writeFile(wb, `relatorio_vendas_${dataHojeIso()}.xlsx`);
+      const { jsPDF } = window.jspdf;
+      const documento = new jsPDF();
+      let linha = 20;
+      documento.setFontSize(18);
+      documento.setTextColor(37, 99, 235);
+      documento.text('Relatorio de Vendas', 20, linha);
+      linha += 10;
+      documento.setFontSize(12);
+      documento.setTextColor(51, 65, 85);
+      documento.text(`Periodo: ${nomeMesRelatorio(mes)}`, 20, linha);
+      linha += 14;
+      documento.setFontSize(11);
+      documento.text(`Faturamento: ${fmtMoeda(faturamento)}`, 20, linha);
+      documento.text(`Registros: ${vendasMes.length}`, 110, linha);
+      linha += 8;
+      documento.text(`Itens vendidos: ${itensVendidos}`, 20, linha);
+      documento.text(`Excluidas: ${vendasMes.filter(venda => venda.excluida).length}`, 110, linha);
+      linha += 16;
+      documento.setFontSize(13);
+      documento.text('Formas de pagamento', 20, linha);
+      linha += 8;
+      documento.setFontSize(10);
+      Object.entries(porForma).forEach(([forma, total]) => {
+        documento.text(`${forma.toUpperCase()}: ${fmtMoeda(total)}`, 25, linha);
+        linha += 6;
+      });
+      linha += 8;
+      documento.setFontSize(13);
+      documento.text('Produtos mais vendidos', 20, linha);
+      linha += 8;
+      documento.setFontSize(10);
+      Object.entries(produtosMaisVendidos).sort((a, b) => b[1] - a[1]).slice(0, 10).forEach(([produto, quantidade]) => {
+        const texto = `${produto}: ${quantidade} item(ns)`;
+        documento.text(texto.substring(0, 85), 25, linha);
+        linha += 6;
+        if (linha > 275) {
+          documento.addPage();
+          linha = 20;
+        }
+      });
+      documento.save(`relatorio_vendas_${mes}.pdf`);
     }
 
     /* ==========================================================================
@@ -668,6 +661,8 @@
 
     async function deletarVenda(id) {
       if(confirm('Deseja cancelar/excluir esta venda?')) {
+        const venda = await dbTrans('vendas', 'readonly', store => store.get(id));
+        if (venda) await DB.put('vendas_excluidas', { ...venda, excluidaEm: new Date().toISOString() });
         await DB.delete('vendas', id);
         renderizarTela();
       }
@@ -756,7 +751,17 @@
     async function getRelatoriosHTML() {
       return `
         <div class="space-y-4">
-          <h2 class="text-xl font-bold text-slate-800">Relatórios & Métricas</h2>
+          <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+            <h2 class="text-xl font-bold text-slate-800">Relatórios & Métricas</h2>
+            <div class="flex items-end gap-2">
+              <label for="relatorio-mes" class="text-xs font-semibold text-slate-500">Mês do relatório</label>
+              <input type="month" id="relatorio-mes" value="${dataHojeIso().substring(0, 7)}" onchange="atualizarRelatorio()" class="p-2 border border-slate-200 rounded-lg text-sm">
+              <button onclick="exportarPDF()" title="Baixar relatório em PDF" class="p-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition flex items-center gap-2 text-sm font-semibold">
+                <i data-lucide="file-down" class="w-4 h-4"></i>
+                <span>Baixar PDF</span>
+              </button>
+            </div>
+          </div>
 
           <div class="bg-white p-4 rounded-xl border border-slate-100 shadow-sm space-y-2">
             <h3 class="text-sm font-bold text-slate-700">Formas de Pagamento</h3>
@@ -772,16 +777,18 @@
     }
 
     async function renderizarGraficos() {
-      const vendas = await DB.getAll('vendas');
+      const vendas = await getVendasRelatorio();
+      const vendasMes = vendas.filter(v => v.data.startsWith(mesRelatorioAtual()));
 
-      const pgtoData = vendas.reduce((acc, v) => {
+      const pgtoData = vendasMes.reduce((acc, v) => {
         acc[v.forma_pagamento] = (acc[v.forma_pagamento] || 0) + v.valor_total;
         return acc;
       }, {});
 
       const ctxPgto = document.getElementById('chart-pgto')?.getContext('2d');
       if(ctxPgto) {
-        new Chart(ctxPgto, {
+        graficoPgto?.destroy();
+        graficoPgto = new Chart(ctxPgto, {
           type: 'doughnut',
           data: {
             labels: Object.keys(pgtoData).map(k => k.toUpperCase()),
@@ -794,7 +801,7 @@
         });
       }
 
-      const prodData = vendas.reduce((acc, v) => {
+      const prodData = vendasMes.reduce((acc, v) => {
         acc[v.nome_produto] = (acc[v.nome_produto] || 0) + Number(v.quantidade);
         return acc;
       }, {});
@@ -803,7 +810,8 @@
 
       const ctxProd = document.getElementById('chart-mais-vendidos')?.getContext('2d');
       if(ctxProd) {
-        new Chart(ctxProd, {
+        graficoProdutos?.destroy();
+        graficoProdutos = new Chart(ctxProd, {
           type: 'bar',
           data: {
             labels: sortedProds.map(p => p[0]),
@@ -825,17 +833,6 @@
       abrirModal(`
         <h3 class="text-lg font-bold mb-4 text-slate-800">Backup & Configurações</h3>
         <div class="space-y-4">
-          <div>
-            <h4 class="text-sm font-semibold text-slate-700">Exportar Planilha Excel</h4>
-            <p class="text-xs text-slate-500 mb-2">Gere um relatório em formato .xlsx formatado.</p>
-            <button onclick="exportarExcel()" class="w-full py-2.5 bg-emerald-600 text-white rounded-lg text-sm font-semibold flex items-center justify-center space-x-2">
-              <i data-lucide="file-spreadsheet" class="w-4 h-4"></i>
-              <span>Baixar Relatório Excel</span>
-            </button>
-          </div>
-
-          <hr class="border-slate-100">
-
           <div>
             <h4 class="text-sm font-semibold text-slate-700">Exportar Backup JSON</h4>
             <p class="text-xs text-slate-500 mb-2">Baixe um backup do banco de dados completo.</p>
@@ -866,7 +863,8 @@
     async function fazerBackup() {
       const produtos = await DB.getAll('produtos');
       const vendas = await DB.getAll('vendas');
-      const payload = JSON.stringify({ produtos, vendas, exportadoEm: new Date().toISOString() }, null, 2);
+      const vendasExcluidas = await DB.getAll('vendas_excluidas');
+      const payload = JSON.stringify({ produtos, vendas, vendasExcluidas, exportadoEm: new Date().toISOString() }, null, 2);
 
       const blob = new Blob([payload], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -889,9 +887,11 @@
             if (confirm('Atenção: Isso substituirá os dados atuais! Deseja continuar?')) {
               await DB.clear('produtos');
               await DB.clear('vendas');
+              await DB.clear('vendas_excluidas');
 
               for (let p of data.produtos) await DB.add('produtos', p);
               for (let v of data.vendas) await DB.add('vendas', v);
+              for (let v of (data.vendasExcluidas || [])) await DB.put('vendas_excluidas', v);
 
               alert('Backup restaurado com sucesso!');
               fecharModal();
