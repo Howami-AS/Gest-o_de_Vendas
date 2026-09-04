@@ -77,6 +77,7 @@
        ========================================================================== */
     const DB_NAME = 'LojaPWA_DB';
     const DB_VERSION = 2;
+    const SENHA_ADMIN = 'admin123';
     let db = null;
 
     function abrirDB() {
@@ -136,14 +137,16 @@
       const [ano, numeroMes] = mes.split('-');
       return new Date(Number(ano), Number(numeroMes) - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' });
     };
+    const vendaCancelada = (venda) => venda.cancelada === true || venda.excluida === true;
+    const vendasAtivas = (vendas) => vendas.filter(venda => !vendaCancelada(venda));
     const getVendasRelatorio = async () => {
       const [vendas, vendasExcluidas] = await Promise.all([
         DB.getAll('vendas'),
         DB.getAll('vendas_excluidas')
       ]);
       return [
-        ...vendas.map(venda => ({ ...venda, excluida: false })),
-        ...vendasExcluidas.map(venda => ({ ...venda, excluida: true }))
+        ...vendas.map(venda => ({ ...venda, cancelada: venda.cancelada === true })),
+        ...vendasExcluidas.map(venda => ({ ...venda, cancelada: true, excluida: true }))
       ];
     };
 
@@ -156,13 +159,14 @@
       const produtos = await DB.getAll('produtos');
       const mes = mesRelatorioAtual();
       const vendasMes = vendas.filter(v => v.data.startsWith(mes));
-      const faturamento = vendasMes.reduce((total, venda) => total + Number(venda.valor_total), 0);
-      const itensVendidos = vendasMes.reduce((total, venda) => total + Number(venda.quantidade), 0);
-      const porForma = vendasMes.reduce((acc, venda) => {
+      const vendasMesAtivas = vendasAtivas(vendasMes);
+      const faturamento = vendasMesAtivas.reduce((total, venda) => total + Number(venda.valor_total), 0);
+      const itensVendidos = vendasMesAtivas.reduce((total, venda) => total + Number(venda.quantidade), 0);
+      const porForma = vendasMesAtivas.reduce((acc, venda) => {
         acc[venda.forma_pagamento] = (acc[venda.forma_pagamento] || 0) + Number(venda.valor_total);
         return acc;
       }, {});
-      const produtosMaisVendidos = vendasMes.reduce((acc, venda) => {
+      const produtosMaisVendidos = vendasMesAtivas.reduce((acc, venda) => {
         acc[venda.nome_produto] = (acc[venda.nome_produto] || 0) + Number(venda.quantidade);
         return acc;
       }, {});
@@ -183,7 +187,7 @@
       documento.text(`Registros: ${vendasMes.length}`, 110, linha);
       linha += 8;
       documento.text(`Itens vendidos: ${itensVendidos}`, 20, linha);
-      documento.text(`Excluidas: ${vendasMes.filter(venda => venda.excluida).length}`, 110, linha);
+      documento.text(`Canceladas: ${vendasMes.filter(vendaCancelada).length}`, 110, linha);
       linha += 16;
       documento.setFontSize(13);
       documento.text('Formas de pagamento', 20, linha);
@@ -254,7 +258,7 @@
     }
 
     async function getDashboardHTML() {
-      const vendas = await DB.getAll('vendas');
+      const vendas = vendasAtivas(await DB.getAll('vendas'));
       const hoje = dataHojeIso();
       const mesAtual = hoje.substring(0, 7);
 
@@ -444,7 +448,7 @@
     }
 
     async function getVendasHTML() {
-      const vendas = await DB.getAll('vendas');
+      const vendas = await getVendasRelatorio();
       vendas.sort((a, b) => new Date(b.data) - new Date(a.data));
 
       return `
@@ -495,12 +499,14 @@
               <span class="text-xs font-bold bg-slate-100 text-slate-600 px-2 py-0.5 rounded capitalize">${v.forma_pagamento}</span>
               <span class="text-xs text-slate-400">${fmtData(v.data)}</span>
             </div>
-            <h4 class="font-semibold text-slate-800 mt-1">${v.nome_produto}</h4>
+            <h4 class="font-semibold ${vendaCancelada(v) ? 'text-slate-400 line-through' : 'text-slate-800'} mt-1">${v.nome_produto}</h4>
             <p class="text-xs text-slate-500">${v.quantidade}x ${fmtMoeda(v.valor_unitario)}</p>
           </div>
           <div class="text-right">
-            <p class="text-base font-bold text-slate-900">${fmtMoeda(v.valor_total)}</p>
-            <button onclick="deletarVenda(${v.id})" class="text-red-500 hover:text-red-700 text-xs mt-1">Excluir</button>
+            <p class="text-base font-bold ${vendaCancelada(v) ? 'text-slate-400 line-through' : 'text-slate-900'}">${fmtMoeda(v.valor_total)}</p>
+            ${vendaCancelada(v)
+              ? '<span class="text-red-500 text-xs font-semibold">Cancelada</span>'
+              : `<button onclick="cancelarVenda(${v.id})" class="text-red-500 hover:text-red-700 text-xs mt-1">Cancelar</button>`}
           </div>
         </div>
       `).join('');
@@ -659,11 +665,12 @@
       renderizarTela();
     }
 
-    async function deletarVenda(id) {
-      if(confirm('Deseja cancelar/excluir esta venda?')) {
+    async function cancelarVenda(id) {
+      if(confirm('Deseja cancelar esta venda? Ela continuará no histórico, mas não será contabilizada.')) {
         const venda = await dbTrans('vendas', 'readonly', store => store.get(id));
-        if (venda) await DB.put('vendas_excluidas', { ...venda, excluidaEm: new Date().toISOString() });
-        await DB.delete('vendas', id);
+        if (venda && !venda.cancelada) {
+          await DB.put('vendas', { ...venda, cancelada: true, canceladaEm: new Date().toISOString() });
+        }
         renderizarTela();
       }
     }
@@ -703,7 +710,7 @@
       const inicio = document.getElementById('fin-inicio').value;
       const fim = document.getElementById('fin-fim').value;
 
-      const vendas = await DB.getAll('vendas');
+      const vendas = vendasAtivas(await DB.getAll('vendas'));
       const filtradas = vendas.filter(v => {
         const d = v.data.substring(0, 10);
         return d >= inicio && d <= fim;
@@ -778,7 +785,7 @@
 
     async function renderizarGraficos() {
       const vendas = await getVendasRelatorio();
-      const vendasMes = vendas.filter(v => v.data.startsWith(mesRelatorioAtual()));
+      const vendasMes = vendasAtivas(vendas.filter(v => v.data.startsWith(mesRelatorioAtual())));
 
       const pgtoData = vendasMes.reduce((acc, v) => {
         acc[v.forma_pagamento] = (acc[v.forma_pagamento] || 0) + v.valor_total;
@@ -852,12 +859,60 @@
             </button>
           </div>
 
+          <div class="border-t border-red-100 pt-4">
+            <h4 class="text-sm font-semibold text-red-700">Zona Administrativa</h4>
+            <p class="text-xs text-slate-500 mb-2">Zera produtos, vendas e cancelamentos. Esta ação não pode ser desfeita.</p>
+            <button onclick="abrirLimpezaDados()" class="w-full py-2.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold flex items-center justify-center space-x-2">
+              <i data-lucide="trash-2" class="w-4 h-4"></i>
+              <span>Zerar todos os dados</span>
+            </button>
+          </div>
+
           <div class="pt-2">
             <button onclick="fecharModal()" class="w-full py-2 border border-slate-200 rounded-lg text-xs font-semibold text-slate-500">Fechar</button>
           </div>
         </div>
       `);
       lucide.createIcons();
+    }
+
+    function abrirLimpezaDados() {
+      abrirModal(`
+        <h3 class="text-lg font-bold mb-2 text-red-700">Zerar todos os dados</h3>
+        <p class="text-sm text-slate-600 mb-4">Produtos, vendas e vendas canceladas serão apagados permanentemente.</p>
+        <form onsubmit="zerarTodosDados(event)" class="space-y-3">
+          <div>
+            <label for="senha-admin" class="block text-xs font-semibold text-slate-600 mb-1">Senha administrativa</label>
+            <input type="password" id="senha-admin" autocomplete="current-password" required class="w-full p-2.5 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500">
+          </div>
+          <div class="flex gap-2">
+            <button type="button" onclick="abrirModalBackup()" class="flex-1 py-2 border border-slate-200 rounded-lg text-sm font-semibold text-slate-600">Voltar</button>
+            <button type="submit" class="flex-1 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg text-sm font-semibold">Confirmar limpeza</button>
+          </div>
+        </form>
+      `);
+      document.getElementById('senha-admin')?.focus();
+    }
+
+    async function zerarTodosDados(event) {
+      event.preventDefault();
+      const senha = document.getElementById('senha-admin').value;
+
+      if (senha !== SENHA_ADMIN) {
+        alert('Senha administrativa inválida.');
+        return;
+      }
+
+      if (!confirm('Confirma a exclusão permanente de todos os dados?')) return;
+
+      await Promise.all([
+        DB.clear('produtos'),
+        DB.clear('vendas'),
+        DB.clear('vendas_excluidas')
+      ]);
+      alert('Todos os dados foram zerados com sucesso.');
+      fecharModal();
+      renderizarTela();
     }
 
     async function fazerBackup() {
