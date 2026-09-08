@@ -585,8 +585,8 @@
             </div>
           </div>
           <div>
-            <label class="block text-xs font-semibold text-slate-600 mb-1">Valor Total</label>
-            <input type="text" id="venda-total" readonly class="w-full p-2.5 bg-blue-50 text-blue-600 font-bold border border-blue-200 rounded-lg text-base">
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Valor Total (com desconto)</label>
+            <input type="number" step="0.01" min="0" id="venda-total" required class="w-full p-2.5 bg-blue-50 text-blue-600 font-bold border border-blue-200 rounded-lg text-base">
           </div>
           <div>
             <label class="block text-xs font-semibold text-slate-600 mb-1">Forma de Pagamento *</label>
@@ -618,7 +618,7 @@
       const unit = parseFloat(document.getElementById('venda-unitario').value || 0);
       const qtd = parseInt(document.getElementById('venda-qtd').value || 0);
       const total = unit * (qtd > 0 ? qtd : 0);
-      document.getElementById('venda-total').value = fmtMoeda(total);
+      document.getElementById('venda-total').value = total.toFixed(2);
     }
 
     async function finalizarVenda(e) {
@@ -628,8 +628,9 @@
       const prodId = parseInt(select.value);
       const qtd = parseInt(document.getElementById('venda-qtd').value);
       const unit = parseFloat(document.getElementById('venda-unitario').value);
+      const valorTotal = parseFloat(document.getElementById('venda-total').value);
 
-      if(!prodId || qtd <= 0) {
+      if(!prodId || qtd <= 0 || !Number.isFinite(valorTotal) || valorTotal < 0) {
         alert('Selecione um produto e uma quantidade válida.');
         return;
       }
@@ -657,7 +658,7 @@
         nome_produto: opt.dataset.nome,
         quantidade: qtd,
         valor_unitario: unit,
-        valor_total: unit * qtd,
+        valor_total: valorTotal,
         forma_pagamento: document.getElementById('venda-pgto').value
       };
 
